@@ -16,7 +16,9 @@ from langchain.memory import ConversationBufferMemory
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.chains import ConversationalRetrievalChain
 from langchain.vectorstores import DocArrayInMemorySearch
+from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 
 st.set_page_config(page_title="ChatPDF", page_icon="📄")
 st.header('Chat with Federal Registry Rules')
@@ -30,27 +32,21 @@ def tags(element):
   return True
 
 #look at text in html and filter by the tags
+# def get_html_text(body):
+#   soup = BeautifulSoup(body, 'html.parser')
+#   texts = soup.findAll(string=True)
+#   visible_texts = filter(tags, texts)
+#   return u" ".join(t.strip() for t in visible_texts)
 def get_html_text(body):
   soup = BeautifulSoup(body, 'html.parser')
-  texts = soup.findAll(string=True)
-  visible_texts = filter(tags, texts)
-  return u" ".join(t.strip() for t in visible_texts)
+  texts = soup.get_text()
+  return texts
 
 class CustomDataChatbot:
 
     def __init__(self):
         utils.configure_openai_api_key()
         self.openai_model = "gpt-3.5-turbo"
-
-    # def save_file(self, file):
-    #     folder = 'tmp'
-    #     if not os.path.exists(folder):
-    #         os.makedirs(folder)
-        
-    #     file_path = f'./{folder}/{file.name}'
-    #     with open(file_path, 'wb') as f:
-    #         f.write(file.getvalue())
-    #     return file_path
 
     @st.spinner('Analyzing documents..')
     def setup_qa_chain(self, doc_number):
@@ -70,6 +66,8 @@ class CustomDataChatbot:
         'Accept-Language': 'en-US,en;q=0.8',
         'Connection': 'keep-alive'}
 
+        #getting fed reg doc
+        st.write("Fetching Federal Register Rule...")
         output = []
         api_url = f"https://www.federalregister.gov/api/v1/documents/{doc_number}.json?fields[]=html_url&fields[]=title"
         r = http.request('GET', api_url)
@@ -82,6 +80,7 @@ class CustomDataChatbot:
         #getting text
         req = http.request("GET", url=url, headers=header)
         page = req.data
+        st.write("Turning Page into Text...")
         text_page = get_html_text(page)
 
         index = text_page.find(title)
@@ -94,17 +93,21 @@ class CustomDataChatbot:
         text_page = re.sub(r'\s+', ' ', text_page)
 
         
-
-        text_splitter =  CharacterTextSplitter(
-            separator= " ",
-            chunk_size = 500,
-            chunk_overlap = 200,
-            length_function = len,
-        )
+        st.write("Chunking Text...")
+        # text_splitter =  CharacterTextSplitter(
+        #     separator= " ",
+        #     chunk_size = 500,
+        #     chunk_overlap = 200,
+        #     length_function = len,
+        # )
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        text_splitter = SemanticChunker(embeddings)
         html_texts = text_splitter.split_text(text_page)
         # Create embeddings and store in vectordb
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vectordb = DocArrayInMemorySearch.from_texts(html_texts, embeddings)
+        st.write("Vectorizing Text...")
+
+        st.write("Storing Vectors...")
+        vectordb = Chroma.from_texts(html_texts, embeddings)
 
         # Define retriever
         retriever = vectordb.as_retriever(
@@ -117,31 +120,40 @@ class CustomDataChatbot:
             memory_key='chat_history',
             return_messages=True
         )
-
+        st.write("Creating Chain...")
         # Setup LLM and QA chain
         llm = ChatOpenAI(model_name=self.openai_model, temperature=0, streaming=True)
         qa_chain = ConversationalRetrievalChain.from_llm(llm, retriever=retriever, memory=memory, verbose=True)
+        st.write("Chain Finished!")
         return qa_chain
 
     @utils.enable_chat_history
     def main(self):
 
+        if "qa_chain" not in st.session_state:
+           st.session_state.qa_chain = None
         # User Inputs
-        uploaded_doc = st.sidebar.text_input("Enter the Document Number", placeholder="2024-12345")
-        if not uploaded_doc:
-            st.error("Please enter a Document Number!")
-            st.stop()
+        with st.sidebar:
+            
+            uploaded_doc = st.text_input("Enter the Document Number", placeholder="Ex: 2024-12345")
+            if st.button("Process"):
+               
+               st.session_state.qa_chain= self.setup_qa_chain(uploaded_doc)
+            if not uploaded_doc:
+                st.error("Please enter a Document Number!")
+                st.stop()
 
         user_query = st.chat_input(placeholder="Ask me anything!")
 
         if uploaded_doc and user_query:
-            qa_chain = self.setup_qa_chain(uploaded_doc)
+            
 
             utils.display_msg(user_query, 'user')
 
             with st.chat_message("assistant"):
                 st_cb = StreamHandler(st.empty())
-                response = qa_chain.run(user_query, callbacks=[st_cb])
+                response = st.session_state.qa_chain.run(user_query, callbacks=[st_cb])
+                response = response.replace(user_query, '')
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
