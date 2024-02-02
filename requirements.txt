@@ -7,3 +7,4 @@ chromadb
 sentence-transformers
 docarray
 langchain_experimental
+pysqlite3-binary
